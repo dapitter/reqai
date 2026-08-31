@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: reqai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: reqai
+      POSTGRES_USER: reqai
+      POSTGRES_PASSWORD: reqai_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - reqai_postgres_data:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reqai -d reqai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  reqai_postgres_data:
