@@ -1,53 +1,60 @@
 # ReqAI — Technical Architecture
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Status:** Foundation
 
 ## 1. Architectural goal
 
-ReqAI will use a modular architecture that separates product presentation, application use cases, domain rules, persistence, and AI provider integration.
+ReqAI will use a modular architecture that separates product presentation, application use cases, domain rules, persistence, AI provider integration, agent capabilities, and infrastructure.
 
-The architecture must support the MVP without prematurely introducing unnecessary microservices, while leaving clear boundaries for future RAG and agent capabilities.
+The architecture must support the MVP without prematurely introducing unnecessary microservices, while leaving clear boundaries for RAG, browser automation, and AI agents.
 
 ## 2. High-level architecture
 
 ```text
-                        ┌──────────────────────┐
-                        │       Browser        │
-                        └──────────┬───────────┘
-                                   │ HTTPS
-                                   ▼
-                        ┌──────────────────────┐
-                        │      Next.js Web     │
-                        │       Frontend       │
-                        └──────────┬───────────┘
-                                   │ REST/JSON
-                                   ▼
-                 ┌─────────────────────────────────┐
-                 │       Spring Boot Backend       │
-                 │                                 │
-                 │  Presentation                  │
-                 │       ↓                         │
-                 │  Application                   │
-                 │       ↓                         │
-                 │  Domain                         │
-                 │       ↓                         │
-                 │  Infrastructure                │
-                 └──────────┬───────────┬──────────┘
-                            │           │
-                            │           ▼
-                            │    ┌───────────────┐
-                            │    │   AI Gateway  │
-                            │    └───────┬───────┘
-                            │            │
-                            │            ▼
-                            │      LLM Provider
-                            │
-                            ▼
-                    ┌─────────────────┐
-                    │   PostgreSQL    │
-                    │   + pgvector   │
-                    └─────────────────┘
+                         ┌──────────────────────┐
+                         │       Browser        │
+                         └──────────┬───────────┘
+                                    │ HTTPS
+                                    ▼
+                         ┌──────────────────────┐
+                         │      Next.js Web     │
+                         │       Frontend       │
+                         └──────────┬───────────┘
+                                    │ REST/JSON
+                                    ▼
+              ┌────────────────────────────────────────┐
+              │          Spring Boot Backend           │
+              │                                        │
+              │ Presentation → Application → Domain    │
+              │                    │                   │
+              │                    ├── Persistence     │
+              │                    ├── AI Gateway      │
+              │                    ├── RAG Service     │
+              │                    └── Agent Service   │
+              └────────────┬───────────────┬───────────┘
+                           │               │
+              ┌────────────┘               └────────────────┐
+              ▼                                             ▼
+      ┌─────────────────┐                          ┌──────────────────┐
+      │   PostgreSQL    │                          │   AI Providers   │
+      │   + pgvector    │                          │ OpenAI / others  │
+      └────────┬────────┘                          └──────────────────┘
+               │
+               │ optional RAG backend
+               ▼
+        ┌───────────────┐
+        │     Qdrant    │
+        │ vector search │
+        └───────────────┘
+
+                    Agent Browser
+                         │
+                         ▼
+                 ┌───────────────┐
+                 │ Browser Agent │
+                 │ isolated svc  │
+                 └───────────────┘
 ```
 
 ## 3. Frontend
@@ -63,9 +70,11 @@ Responsibilities:
 - Generated artifact editor
 - Quality findings visualization
 - Requirement history
+- AI provider / BYOK configuration
+- Agent execution status
 - API consumption
 
-The frontend must not contain AI provider credentials or business-critical rules.
+The frontend must never receive or persist raw AI provider secrets in browser storage.
 
 ## 4. Backend
 
@@ -82,22 +91,63 @@ com.reqai
 │   ├── project
 │   ├── requirement
 │   ├── analysis
+│   ├── provider
+│   ├── agent
 │   └── shared
 ├── application
 │   ├── project
 │   ├── requirement
-│   └── analysis
+│   ├── analysis
+│   ├── provider
+│   └── agent
 ├── infrastructure
 │   ├── persistence
 │   ├── ai
+│   ├── vector
+│   ├── browser
 │   └── configuration
 └── presentation
     ├── project
     ├── requirement
-    └── analysis
+    ├── analysis
+    ├── provider
+    └── agent
 ```
 
-## 5. Application flow
+## 5. BYOK — Bring Your Own Key
+
+BYOK is a first-class architecture capability for AI provider credentials.
+
+The user may configure their own provider API key so ReqAI can execute AI operations using the user's provider account rather than a shared platform key.
+
+Rules:
+
+- API keys are never stored in plaintext in the database.
+- Keys are submitted only over HTTPS.
+- The backend is the only component allowed to use provider credentials.
+- Keys should be encrypted at rest using an application-managed encryption mechanism or external secret manager.
+- Logs must never contain API keys.
+- The UI should display only masked credentials.
+- Provider selection and model selection are stored as configuration metadata, not as secrets.
+- A platform-managed provider key may exist for a future managed plan, but BYOK remains supported independently.
+
+Conceptual flow:
+
+```text
+User
+ ↓
+Provider Settings
+ ↓ HTTPS
+Backend
+ ↓
+Secret Encryption / Secret Store
+ ↓
+AI Gateway
+ ↓
+Selected Provider + Model
+```
+
+## 6. Application flow
 
 ```text
 POST /api/v1/projects/{projectId}/requirements/analyze
@@ -109,7 +159,10 @@ POST /api/v1/projects/{projectId}/requirements/analyze
        Load project context
                  │
                  ▼
-       Build AI analysis input
+       Retrieve relevant context
+                 │
+                 ▼
+       Resolve AI provider
                  │
                  ▼
           AI Gateway
@@ -124,7 +177,7 @@ POST /api/v1/projects/{projectId}/requirements/analyze
            Return result
 ```
 
-## 6. AI Gateway
+## 7. AI Gateway
 
 The application will isolate the LLM provider behind an internal abstraction.
 
@@ -138,43 +191,134 @@ AIAnalysisService
  └── generateBusinessRules()
 ```
 
-This prevents domain/application code from depending directly on a specific provider SDK.
+The gateway resolves the provider configuration without exposing provider-specific concerns to the domain.
 
-## 7. AI output validation
+## 8. Vector search — pgvector and Qdrant
 
-AI output must be treated as untrusted generated data.
+ReqAI supports two architectural vector-search strategies.
 
-The backend will:
+### Default for MVP / early production
 
-1. Request structured output.
-2. Parse the response.
-3. Validate the expected schema.
-4. Reject malformed responses.
-5. Mark generated content as AI-generated.
-6. Persist the result only after successful validation.
+**PostgreSQL + pgvector**.
 
-## 8. RAG readiness
+Advantages:
 
-The MVP does not require a complete RAG pipeline, but the architecture will reserve an infrastructure boundary for:
+- One primary persistence platform.
+- Transactional metadata and vectors can remain close together.
+- Lower operational complexity.
+- Good fit for the initial product scale.
 
-- document ingestion;
-- chunking;
-- embeddings;
-- vector search;
-- context assembly.
+### Optional scale-out strategy
 
-PostgreSQL + pgvector is preferred to avoid introducing a second database during the early product stages.
+**Qdrant** may be introduced when semantic search volume, retrieval requirements, or operational characteristics justify a dedicated vector database.
 
-## 9. Security boundaries
+The application should hide this decision behind a `VectorStore` abstraction:
 
-- Secrets stored exclusively in environment variables or deployment secret stores.
+```text
+VectorStore
+ ├── PgVectorStore
+ └── QdrantVectorStore
+```
+
+This means the product can start with pgvector and migrate or route selected workloads to Qdrant without changing domain logic.
+
+## 9. Agent Browser
+
+The Agent Browser is an isolated capability for future browser-based agents.
+
+Potential uses include:
+
+- navigating external web applications;
+- collecting authorized project information;
+- validating UI flows;
+- executing controlled browser tasks;
+- supporting integrations where an API is unavailable.
+
+Security requirements:
+
+- Browser execution must be isolated from the main API process.
+- Credentials must be handled through secure secret storage.
+- Navigation and actions must be allowlisted or policy-controlled where appropriate.
+- Browser sessions must be auditable.
+- Agent actions require explicit user authorization for sensitive operations.
+- No unrestricted autonomous access to arbitrary systems.
+
+The Agent Browser is **not required for the MVP**. It belongs to the agent evolution phase.
+
+## 10. Docker Compose
+
+Docker Compose will provide the reproducible local development environment.
+
+Initial services:
+
+```text
+services:
+  postgres
+  backend
+  frontend
+```
+
+When RAG is enabled locally:
+
+```text
+services:
+  postgres
+  qdrant        # optional profile
+  backend
+  frontend
+```
+
+When browser agents are enabled:
+
+```text
+services:
+  postgres
+  qdrant
+  backend
+  frontend
+  browser-agent
+```
+
+Compose profiles should prevent optional infrastructure from being required by the MVP.
+
+## 11. Hostinger infrastructure
+
+Hostinger is the target infrastructure for the self-hosted backend environment where compatible with the selected hosting product.
+
+Target deployment concept:
+
+```text
+Internet
+   │
+   ▼
+HTTPS / Reverse Proxy
+   │
+   ├───────────────► Next.js
+   │
+   └───────────────► Spring Boot API
+                         │
+                         ├── PostgreSQL
+                         ├── pgvector
+                         ├── Qdrant (optional)
+                         ├── AI Providers
+                         └── Browser Agent (optional)
+```
+
+Docker Compose is the deployment unit for services that are hosted together on a Hostinger environment capable of running Docker workloads.
+
+Infrastructure secrets must be injected through the hosting environment and must not be committed to Git.
+
+## 12. Security boundaries
+
+- Secrets stored exclusively in encrypted storage, environment variables, or deployment secret stores.
 - Authentication handled at the application boundary.
 - Authorization checked for every project resource.
 - AI provider keys never exposed to the browser.
 - User-generated content treated as untrusted input.
+- Agent Browser isolated from the main application process.
 - Logs must not expose API keys or sensitive request content unnecessarily.
 
-## 10. Error handling
+## 13. Error handling
 
 The API should expose stable application error codes rather than leaking infrastructure exceptions.
 
@@ -188,7 +332,7 @@ Example:
 }
 ```
 
-## 11. Testing strategy
+## 14. Testing strategy
 
 ### Unit tests
 
@@ -202,21 +346,44 @@ Spring Boot integration with PostgreSQL using Testcontainers.
 
 Validate parsing and schema compatibility using deterministic fixtures.
 
+### RAG tests
+
+Validate chunking, embedding metadata, retrieval relevance, and source traceability.
+
+### Agent tests
+
+Validate agent policies, tool permissions, browser action boundaries, and failure handling.
+
 ### End-to-end tests
 
 Playwright covering the primary user journey.
 
-## 12. Deployment evolution
+## 15. Deployment evolution
 
-### MVP
+### Local development
 
 ```text
-Next.js → Backend → PostgreSQL
-                  ↓
-                 LLM
+Docker Compose
+├── Next.js
+├── Spring Boot
+├── PostgreSQL + pgvector
+├── Qdrant (optional)
+└── Browser Agent (optional)
 ```
 
-### Future
+### Initial hosted environment
+
+```text
+Hostinger
+├── Reverse Proxy / HTTPS
+├── Next.js
+├── Spring Boot
+├── PostgreSQL
+├── pgvector
+└── optional Qdrant / Browser Agent
+```
+
+### Future scale
 
 ```text
 Next.js
@@ -225,14 +392,23 @@ API
    ↓
 Application Core
    ├── PostgreSQL
-   ├── Vector Search
+   ├── VectorStore
    ├── AI Gateway
    ├── Document Pipeline
-   └── Agent Orchestrator
+   ├── Agent Orchestrator
+   └── Browser Agent
 ```
 
-## 13. Architectural decision
+## 16. Architectural decisions
 
 The initial implementation will be a **modular monolith** on the backend rather than microservices.
 
-Reason: the MVP needs strong domain boundaries and testability, but does not yet have operational complexity that justifies distributed deployment. Modules can be extracted later if real product requirements demand it.
+Reason: the MVP needs strong domain boundaries and testability, but does not yet have operational complexity that justifies distributed deployment.
+
+Vector search starts with **pgvector**. Qdrant remains an explicit adapter for future scale or specialized retrieval workloads.
+
+BYOK is part of the product architecture from the beginning, even if the first MVP exposes only a limited provider configuration flow.
+
+Docker Compose is the standard local orchestration mechanism.
+
+Hostinger is the target self-hosted infrastructure for the deployed portfolio/product environment, subject to the selected Hostinger plan supporting the required Docker workloads.
