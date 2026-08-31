@@ -1,175 +1,156 @@
-# ReqAI — Database Model
+# ReqAI — Database Architecture
 
-**Version:** 1.0  
-**Database:** PostgreSQL
+**Version:** 1.1  
+**Database:** PostgreSQL  
+**Vector search:** pgvector
 
-## 1. Modeling principles
+## 1. Decision
 
-- UUID identifiers for externally exposed entities.
-- Foreign keys for ownership and traceability.
-- Timestamps for auditability.
-- Soft deletion only where justified by the domain.
-- AI-generated content must be distinguishable from user-approved content.
+ReqAI will use **PostgreSQL + pgvector** as the primary persistence and vector-search solution.
 
-## 2. Core entities
+Qdrant is intentionally excluded from the MVP runtime. It remains a future alternative if scale or retrieval requirements justify a dedicated vector database.
+
+## 2. Why PostgreSQL + pgvector
+
+- One primary database for transactional and vector data.
+- Lower operational complexity.
+- Strong relational modeling for requirements and traceability.
+- PostgreSQL transactions for domain consistency.
+- Vector similarity search without another mandatory database.
+- Simple local development with Docker Compose.
+- Strong foundation for RAG.
+
+## 3. Core entities
 
 ```text
 User
   │
-  └──< Project
-          │
-          └──< Requirement
-                  │
-                  ├──< RequirementVersion
-                  │       ├──< UserStory
-                  │       ├──< AcceptanceCriterion
-                  │       ├──< BusinessRule
-                  │       └──< ClarificationQuestion
-                  │
-                  └──< Analysis
-                          └──< QualityFinding
+  └──< OrganizationMember >── Organization
+                                  │
+                                  └──< Project
+                                          │
+                                          ├──< Requirement
+                                          │       │
+                                          │       └──< RequirementVersion
+                                          │                 ├──< UserStory
+                                          │                 ├──< AcceptanceCriterion
+                                          │                 ├──< BusinessRule
+                                          │                 ├──< QualityFinding
+                                          │                 └──< ClarificationQuestion
+                                          │
+                                          ├──< Document
+                                          │       │
+                                          │       └──< DocumentChunk
+                                          │                  └── embedding vector
+                                          │
+                                          └──< AIAnalysis
 ```
 
-## 3. Tables
+## 4. Main tables
 
 ### users
 
-- id UUID PK
-- email VARCHAR UNIQUE NOT NULL
-- name VARCHAR NOT NULL
-- created_at TIMESTAMPTZ NOT NULL
-- updated_at TIMESTAMPTZ NOT NULL
+Application users.
+
+### organizations
+
+Tenant boundary for future multi-tenant operation.
+
+### organization_members
+
+Relationship between users and organizations, including role.
 
 ### projects
 
-- id UUID PK
-- owner_id UUID FK users.id NOT NULL
-- name VARCHAR NOT NULL
-- description TEXT
-- domain_context TEXT
-- created_at TIMESTAMPTZ NOT NULL
-- updated_at TIMESTAMPTZ NOT NULL
+Product/project context used during requirements analysis.
 
 ### requirements
 
-- id UUID PK
-- project_id UUID FK projects.id NOT NULL
-- title VARCHAR
-- source_text TEXT NOT NULL
-- status VARCHAR NOT NULL
-- created_at TIMESTAMPTZ NOT NULL
-- updated_at TIMESTAMPTZ NOT NULL
+Stable identity of a requirement across versions.
 
 ### requirement_versions
 
-- id UUID PK
-- requirement_id UUID FK requirements.id NOT NULL
-- version_number INTEGER NOT NULL
-- source_text TEXT NOT NULL
-- created_by VARCHAR NOT NULL
-- created_at TIMESTAMPTZ NOT NULL
+Immutable snapshots of requirement content and approval state.
 
 ### user_stories
 
-- id UUID PK
-- requirement_version_id UUID FK requirement_versions.id NOT NULL
-- actor TEXT NOT NULL
-- goal TEXT NOT NULL
-- benefit TEXT NOT NULL
-- generated_by_ai BOOLEAN NOT NULL
-- approved_at TIMESTAMPTZ
+Structured User Story generated or edited from a requirement version.
 
 ### acceptance_criteria
 
-- id UUID PK
-- requirement_version_id UUID FK requirement_versions.id NOT NULL
-- sequence INTEGER NOT NULL
-- description TEXT NOT NULL
-- generated_by_ai BOOLEAN NOT NULL
-- approved_at TIMESTAMPTZ
+Testable acceptance criteria associated with a User Story.
 
 ### business_rules
 
-- id UUID PK
-- requirement_version_id UUID FK requirement_versions.id NOT NULL
-- code VARCHAR
-- description TEXT NOT NULL
-- status VARCHAR NOT NULL
-- generated_by_ai BOOLEAN NOT NULL
-- approved_at TIMESTAMPTZ
-
-Suggested status values:
-
-- PROPOSED
-- CONFIRMED
-- REJECTED
-
-### clarification_questions
-
-- id UUID PK
-- requirement_version_id UUID FK requirement_versions.id NOT NULL
-- question TEXT NOT NULL
-- priority VARCHAR NOT NULL
-- resolved BOOLEAN NOT NULL
-- answer TEXT
-
-### analyses
-
-- id UUID PK
-- requirement_version_id UUID FK requirement_versions.id NOT NULL
-- provider VARCHAR NOT NULL
-- model VARCHAR NOT NULL
-- quality_score NUMERIC(5,2)
-- status VARCHAR NOT NULL
-- created_at TIMESTAMPTZ NOT NULL
+Business rules associated with the requirement. Proposed AI rules must be distinguishable from confirmed rules.
 
 ### quality_findings
 
-- id UUID PK
-- analysis_id UUID FK analyses.id NOT NULL
-- category VARCHAR NOT NULL
-- severity VARCHAR NOT NULL
-- message TEXT NOT NULL
-- recommendation TEXT
-- resolved BOOLEAN NOT NULL
+Quality issues detected during analysis.
 
-## 4. Future RAG entities
+### clarification_questions
 
-The database may later include:
+Questions generated from missing or ambiguous information.
 
-- documents
-- document_chunks
-- embeddings
-- knowledge_sources
+### ai_analyses
 
-Embeddings will use pgvector.
+Execution record for an AI analysis, including provider/model metadata and structured result status.
 
-## 5. Key indexes
+### documents
 
-Initial indexes should cover:
+Project documents that can provide context for RAG.
 
-- projects.owner_id
-- requirements.project_id
-- requirement_versions.requirement_id
-- analyses.requirement_version_id
-- quality_findings.analysis_id
+### document_chunks
 
-## 6. Traceability
+Chunked document content with embeddings for semantic retrieval.
 
-The model deliberately connects:
+## 5. Vector model
+
+`document_chunks.embedding` will use PostgreSQL's `vector` type provided by pgvector.
+
+The embedding dimension must be configurable because it depends on the selected embedding model. Provider-specific dimensions must not leak into the domain model.
+
+## 6. RAG query flow
 
 ```text
-Project
-  ↓
 Requirement
-  ↓
-Requirement Version
-  ├── User Story
-  ├── Acceptance Criteria
-  ├── Business Rules
-  ├── Questions
-  └── Analysis
-       └── Findings
+    ↓
+Create query embedding
+    ↓
+pgvector similarity search
+    ↓
+Top-K relevant chunks
+    ↓
+Build context
+    ↓
+LLM
+    ↓
+Structured response
 ```
 
-This allows future impact analysis and audit trails without redesigning the core domain.
+## 7. Traceability
+
+Every retrieved chunk must retain its source document and project association. AI analyses should preserve enough metadata to identify the context used for the execution.
+
+## 8. Data ownership
+
+All project-scoped entities must be reachable through an organization/project ownership boundary. Repository services must enforce authorization before returning or mutating project data.
+
+## 9. Versioning strategy
+
+Requirements have a stable identity and multiple versions.
+
+```text
+Requirement
+   │
+   ├── Version 1 — Draft
+   ├── Version 2 — AI refined
+   ├── Version 3 — User edited
+   └── Version 4 — Approved
+```
+
+Historical versions are never overwritten.
+
+## 10. Future optimization
+
+The MVP will start with straightforward pgvector similarity queries. Index strategy and retrieval parameters will be optimized from measured workload rather than prematurely adding infrastructure.
